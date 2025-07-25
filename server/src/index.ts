@@ -18,34 +18,39 @@ app.use(cors());
 app.use(express.json());
 
 async function getFileContentSnippet(bucket: string, path: string, type: string): Promise<string> {
-  const { data, error } = await supabase.storage.from(bucket).download(path);
-  if (error || !data) {
-    console.error(`[Supabase] Error downloading file: bucket=${bucket}, path=${path}, error=${error?.message}`);
+  try {
+    const { data, error } = await supabase.storage.from(bucket).download(path);
+    if (error || !data) {
+      console.error(`Download error for ${bucket}/${path}:`, error?.message);
+      return '';
+    }
+    if (type === 'pdf') {
+      const buffer = Buffer.from(await data.arrayBuffer());
+      try {
+        const pdfData = await pdfParse(buffer);
+        return pdfData.text.substring(0, 1000); // First 1000 chars
+      } catch (err) {
+        console.error(`PDF parse error for ${bucket}/${path}:`, err);
+        return '';
+      }
+    } else if (type === 'xlsx') {
+      const buffer = Buffer.from(await data.arrayBuffer());
+      try {
+        const workbook = XLSX.read(buffer, { type: 'buffer' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+        return JSON.stringify(json).substring(0, 1000); // First 1000 chars
+      } catch (err) {
+        console.error(`XLSX parse error for ${bucket}/${path}:`, err);
+        return '';
+      }
+    }
+    return '';
+  } catch (err) {
+    console.error(`General file error for ${bucket}/${path}:`, err);
     return '';
   }
-  if (type === 'pdf') {
-    const buffer = Buffer.from(await data.arrayBuffer());
-    try {
-      const pdfData = await pdfParse(buffer);
-      return pdfData.text.substring(0, 1000); // First 1000 chars
-    } catch (e) {
-      console.error(`[PDF Parse] Error parsing PDF: bucket=${bucket}, path=${path}, error=${e}`);
-      return '';
-    }
-  } else if (type === 'xlsx') {
-    const buffer = Buffer.from(await data.arrayBuffer());
-    try {
-      const workbook = XLSX.read(buffer, { type: 'buffer' });
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      return JSON.stringify(json).substring(0, 1000); // First 1000 chars
-    } catch (e) {
-      console.error(`[XLSX Parse] Error parsing XLSX: bucket=${bucket}, path=${path}, error=${e}`);
-      return '';
-    }
-  }
-  return '';
 }
 
 // List/search knowledge files
@@ -69,25 +74,12 @@ app.get('/api/knowledge-files/download', async (req: Request, res: Response) => 
   if (!bucket || !path) return res.status(400).json({ error: 'bucket and path are required' });
   try {
     const { data, error } = await supabase.storage.from(String(bucket)).createSignedUrl(String(path), 60 * 60); // 1 hour
-    if (error || !data?.signedUrl) {
-      console.error(`[Supabase] Error generating signed URL: bucket=${bucket}, path=${path}, error=${error?.message}`);
-      return res.status(404).json({ error: 'File not found or cannot generate download link.' });
-    }
+    if (error) throw error;
     res.json({ url: data.signedUrl });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Simple keyword search in file name and snippet
-function fileMatchesQuery(file: any, query: string): boolean {
-  const q = query.toLowerCase();
-  return (
-    file.filename?.toLowerCase().includes(q) ||
-    file.code_block?.toLowerCase().includes(q) ||
-    file.snippet?.toLowerCase().includes(q)
-  );
-}
 
 // Chat endpoint with AI integration
 app.post('/api/chat', async (req: Request, res: Response) => {
@@ -103,16 +95,24 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       .order('created_at', { ascending: false });
     if (error) throw error;
 
-    // For each file, get a snippet and a download link
+    // Simple keyword search: filter files by user question
+    const keyword = message.toLowerCase();
+    const relevantFiles = (files || []).filter((f: any) =>
+      f.filename?.toLowerCase().includes(keyword) ||
+      f.code_block?.toLowerCase().includes(keyword) ||
+      f.type?.toLowerCase().includes(keyword)
+    );
+    // If no relevant files, fallback to all files
+    const filesToProcess = relevantFiles.length > 0 ? relevantFiles : files || [];
+
+    // For each file, get a snippet and a download link, log missing files
     const fileInfos = await Promise.all(
-      (files || []).map(async (f: any) => {
-        // Check if file exists in Supabase
-        const { data: urlData, error: urlError } = await supabase.storage.from(f.bucket).createSignedUrl(f.path, 60 * 60);
-        if (urlError || !urlData?.signedUrl) {
-          console.error(`[Supabase] File missing or cannot generate download link: bucket=${f.bucket}, path=${f.path}, error=${urlError?.message}`);
-          return null;
-        }
+      filesToProcess.map(async (f: any) => {
         const snippet = await getFileContentSnippet(f.bucket, f.path, f.type);
+        const { data: urlData, error: urlError } = await supabase.storage.from(f.bucket).createSignedUrl(f.path, 60 * 60);
+        if (urlError) {
+          console.error(`Download URL error for ${f.bucket}/${f.path}:`, urlError.message);
+        }
         return {
           id: f.id,
           filename: f.filename,
@@ -124,33 +124,29 @@ app.post('/api/chat', async (req: Request, res: Response) => {
           uploaded_by: f.uploaded_by,
           created_at: f.created_at,
           snippet,
-          downloadUrl: urlData.signedUrl
+          downloadUrl: urlData?.signedUrl || null
         };
       })
     );
 
-    // Filter out missing files
-    const validFiles = fileInfos.filter(Boolean);
-
-    // Simple keyword search: only send files relevant to the user's question
-    const relevantFiles = validFiles.filter(f => fileMatchesQuery(f, message));
-    // If no relevant files, fallback to all files (limit to 5 for prompt size)
-    const filesForAI = relevantFiles.length > 0 ? relevantFiles.slice(0, 5) : validFiles.slice(0, 5);
-
     // Build context string for AI
-    const context = filesForAI.length > 0
-      ? `Relevant knowledge files (${filesForAI.length}):\n` +
-        filesForAI.map((f, i) => `${i + 1}. ${f.filename} (${f.type})\nSnippet: ${f.snippet}`).join('\n\n')
-      : 'No relevant knowledge base files found.';
+    const context = fileInfos.length > 0
+      ? `Available knowledge files (${fileInfos.length}):\n` +
+        fileInfos.map((f, i) => `${i + 1}. ${f.filename} (${f.type})\nSnippet: ${f.snippet}\nDownload: ${f.downloadUrl || 'Not available'}`).join('\n\n')
+      : 'No knowledge base files available.';
 
-    // System prompt for Mistral AI
+    // System prompt for Mistral AI with document_library tool
     const systemPrompt = `You are an intelligent assistant for the C-O-D-E framework.\n\nCONTEXT:\n${context}\n\nINSTRUCTIONS:\n1. Always search the knowledge base before responding.\n2. If you find relevant files, mention their names and provide download links.\n3. If no relevant knowledge is available, suggest what might be helpful.\n\nUSER QUESTION: ${message}`;
 
-    // Call Mistral AI API
+    // Call Mistral AI API with document_library tool enabled
     const mistralRes = await axios.post(
       'https://api.mistral.ai/v1/chat/completions',
       {
         model: 'mistral-small-latest',
+        tools: [
+          { "type": "document_library" },
+          { "type": "code_interpreter" }
+        ],
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: message }
@@ -166,7 +162,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     const aiMessage = mistralRes.data.choices?.[0]?.message?.content || 'No response from AI.';
 
     // Return AI answer and file info (with download links)
-    res.json({ message: aiMessage, files: filesForAI });
+    res.json({ message: aiMessage, files: fileInfos });
   } catch (error: any) {
     console.error('Mistral AI error:', error?.response?.data || error.message);
     res.status(500).json({ message: 'Failed to get AI response.' });
