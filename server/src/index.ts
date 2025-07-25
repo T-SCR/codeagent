@@ -4,6 +4,8 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
+import * as XLSX from 'xlsx';
+import pdfParse from 'pdf-parse';
 
 const supabaseUrl = 'https://pjqbbmbiamiddvrwrals.supabase.co';
 const supabaseKey = process.env.SUPABASE_KEY!;
@@ -14,6 +16,32 @@ const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
+
+async function getFileContentSnippet(bucket: string, path: string, type: string): Promise<string> {
+  const { data, error } = await supabase.storage.from(bucket).download(path);
+  if (error || !data) return '';
+  if (type === 'pdf') {
+    const buffer = Buffer.from(await data.arrayBuffer());
+    try {
+      const pdfData = await pdfParse(buffer);
+      return pdfData.text.substring(0, 1000); // First 1000 chars
+    } catch {
+      return '';
+    }
+  } else if (type === 'xlsx') {
+    const buffer = Buffer.from(await data.arrayBuffer());
+    try {
+      const workbook = XLSX.read(buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      return JSON.stringify(json).substring(0, 1000); // First 1000 chars
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
 
 // List/search knowledge files
 app.get('/api/knowledge-files', async (req: Request, res: Response) => {
@@ -57,14 +85,35 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       .order('created_at', { ascending: false });
     if (error) throw error;
 
+    // For each file, get a snippet and a download link
+    const fileInfos = await Promise.all(
+      (files || []).map(async (f: any) => {
+        const snippet = await getFileContentSnippet(f.bucket, f.path, f.type);
+        const { data: urlData } = await supabase.storage.from(f.bucket).createSignedUrl(f.path, 60 * 60);
+        return {
+          id: f.id,
+          filename: f.filename,
+          bucket: f.bucket,
+          path: f.path,
+          type: f.type,
+          code_block: f.code_block,
+          is_default: f.is_default,
+          uploaded_by: f.uploaded_by,
+          created_at: f.created_at,
+          snippet,
+          downloadUrl: urlData?.signedUrl || null
+        };
+      })
+    );
+
     // Build context string for AI
-    const context = files && files.length > 0
-      ? `Available knowledge files (${files.length}):\n` +
-        files.map((f: any, i: number) => `${i + 1}. ${f.filename} (${f.type})`).join('\n')
+    const context = fileInfos.length > 0
+      ? `Available knowledge files (${fileInfos.length}):\n` +
+        fileInfos.map((f, i) => `${i + 1}. ${f.filename} (${f.type})\nSnippet: ${f.snippet}`).join('\n\n')
       : 'No knowledge base files available.';
 
     // System prompt for Mistral AI
-    const systemPrompt = `You are an intelligent assistant for the C-O-D-E framework.\n\nCONTEXT:\n${context}\n\nINSTRUCTIONS:\n1. Always search the knowledge base before responding.\n2. If you find relevant files, mention their names.\n3. If no relevant knowledge is available, suggest what might be helpful.\n\nUSER QUESTION: ${message}`;
+    const systemPrompt = `You are an intelligent assistant for the C-O-D-E framework.\n\nCONTEXT:\n${context}\n\nINSTRUCTIONS:\n1. Always search the knowledge base before responding.\n2. If you find relevant files, mention their names and provide download links.\n3. If no relevant knowledge is available, suggest what might be helpful.\n\nUSER QUESTION: ${message}`;
 
     // Call Mistral AI API
     const mistralRes = await axios.post(
@@ -85,8 +134,8 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     );
     const aiMessage = mistralRes.data.choices?.[0]?.message?.content || 'No response from AI.';
 
-    // Return AI answer and file list
-    res.json({ message: aiMessage, files });
+    // Return AI answer and file info (with download links)
+    res.json({ message: aiMessage, files: fileInfos });
   } catch (error: any) {
     console.error('Mistral AI error:', error?.response?.data || error.message);
     res.status(500).json({ message: 'Failed to get AI response.' });

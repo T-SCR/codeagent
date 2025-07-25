@@ -18,6 +18,8 @@ interface KnowledgeFile {
   is_default: boolean;
   uploaded_by?: string;
   created_at: string;
+  snippet?: string;
+  downloadUrl?: string;
 }
 
 export const AIChat: React.FC = () => {
@@ -60,10 +62,8 @@ export const AIChat: React.FC = () => {
     }
   };
 
-  const handleDownload = async (file: KnowledgeFile) => {
-    const res = await fetch(`${BACKEND_URL}/api/knowledge-files/download?bucket=${encodeURIComponent(file.bucket)}&path=${encodeURIComponent(file.path)}`);
-    const data = await res.json();
-    if (data.url) window.open(data.url, '_blank');
+  const handleDownload = (file: KnowledgeFile) => {
+    if (file.downloadUrl) window.open(file.downloadUrl, '_blank');
   };
 
   return (
@@ -100,11 +100,16 @@ export const AIChat: React.FC = () => {
           <h4>Knowledge Files</h4>
           <ul>
             {knowledgeFiles.map((file) => (
-              <li key={file.id} style={{ marginBottom: 8 }}>
-                <button onClick={() => handleDownload(file)} style={{ textDecoration: 'underline', background: 'none', border: 'none', color: '#007bff', cursor: 'pointer' }}>
+              <li key={file.id} style={{ marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid #eee' }}>
+                <button onClick={() => handleDownload(file)} style={{ textDecoration: 'underline', background: 'none', border: 'none', color: '#007bff', cursor: 'pointer', fontWeight: 600 }}>
                   {file.filename}
                 </button>
                 {file.code_block && <span style={{ marginLeft: 8, color: '#888' }}>({file.code_block})</span>}
+                {file.snippet && (
+                  <div style={{ fontSize: 12, color: '#555', marginTop: 4, background: '#f5f5f5', padding: 4, borderRadius: 4 }}>
+                    <strong>Snippet:</strong> {file.snippet}
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -112,4 +117,4 @@ export const AIChat: React.FC = () => {
       )}
     </div>
   );
-}; 
+};
