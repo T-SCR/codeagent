@@ -60,7 +60,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     // Build context string for AI
     const context = files && files.length > 0
       ? `Available knowledge files (${files.length}):\n` +
-        files.map((f, i) => `${i + 1}. ${f.filename} (${f.type})`).join('\n')
+        files.map((f: any, i: number) => `${i + 1}. ${f.filename} (${f.type})`).join('\n')
       : 'No knowledge base files available.';
 
     // System prompt for Mistral AI
