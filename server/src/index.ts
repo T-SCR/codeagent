@@ -6,6 +6,8 @@ import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
 import pdfParse from 'pdf-parse';
+import fs from 'fs';
+import path from 'path';
 
 const supabaseUrl = 'https://pjqbbmbiamiddvrwrals.supabase.co';
 const supabaseKey = process.env.SUPABASE_KEY!;
@@ -13,24 +15,26 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const LOCAL_FILES_DIR = path.join(__dirname, '../../files');
+const CHAT_HISTORY_FILE = path.join(__dirname, '../../chat_history.json');
 
 app.use(cors());
 app.use(express.json());
 
-async function getFileContentSnippet(bucket: string, path: string, type: string): Promise<string> {
+async function getFileContentSnippet(bucket: string, pathStr: string, type: string): Promise<string> {
   try {
-    const { data, error } = await supabase.storage.from(bucket).download(path);
+    const { data, error } = await supabase.storage.from(bucket).download(pathStr);
     if (error || !data) {
-      console.error(`Download error for ${bucket}/${path}:`, error?.message);
+      console.error(`Download error for ${bucket}/${pathStr}:`, error?.message);
       return '';
     }
     if (type === 'pdf') {
       const buffer = Buffer.from(await data.arrayBuffer());
       try {
         const pdfData = await pdfParse(buffer);
-        return pdfData.text.substring(0, 1000); // First 1000 chars
+        return pdfData.text.substring(0, 1000);
       } catch (err) {
-        console.error(`PDF parse error for ${bucket}/${path}:`, err);
+        console.error(`PDF parse error for ${bucket}/${pathStr}:`, err);
         return '';
       }
     } else if (type === 'xlsx') {
@@ -40,40 +44,103 @@ async function getFileContentSnippet(bucket: string, path: string, type: string)
         const sheetName = workbook.SheetNames[0];
         const sheet = workbook.Sheets[sheetName];
         const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-        return JSON.stringify(json).substring(0, 1000); // First 1000 chars
+        return JSON.stringify(json).substring(0, 1000);
       } catch (err) {
-        console.error(`XLSX parse error for ${bucket}/${path}:`, err);
+        console.error(`XLSX parse error for ${bucket}/${pathStr}:`, err);
         return '';
       }
     }
     return '';
   } catch (err) {
-    console.error(`General file error for ${bucket}/${path}:`, err);
+    console.error(`General file error for ${bucket}/${pathStr}:`, err);
     return '';
   }
 }
 
-// List/search knowledge files
+function getLocalFilesList(): Array<any> {
+  if (!fs.existsSync(LOCAL_FILES_DIR)) return [];
+  const files = fs.readdirSync(LOCAL_FILES_DIR);
+  return files.map((filename) => {
+    const ext = path.extname(filename).toLowerCase();
+    let type = '';
+    if (ext === '.pdf') type = 'pdf';
+    else if (ext === '.xlsx') type = 'xlsx';
+    return {
+      id: `local-${filename}`,
+      filename,
+      bucket: 'local',
+      path: filename,
+      type,
+      code_block: '',
+      is_default: false,
+      uploaded_by: null,
+      created_at: fs.statSync(path.join(LOCAL_FILES_DIR, filename)).ctime,
+    };
+  });
+}
+
+async function getLocalFileContentSnippet(filename: string, type: string): Promise<string> {
+  const filePath = path.join(LOCAL_FILES_DIR, filename);
+  if (!fs.existsSync(filePath)) return '';
+  if (type === 'pdf') {
+    try {
+      const buffer = fs.readFileSync(filePath);
+      const pdfData = await pdfParse(buffer);
+      return pdfData.text.substring(0, 1000);
+    } catch (err) {
+      console.error(`Local PDF parse error for ${filename}:`, err);
+      return '';
+    }
+  } else if (type === 'xlsx') {
+    try {
+      const workbook = XLSX.readFile(filePath);
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      return JSON.stringify(json).substring(0, 1000);
+    } catch (err) {
+      console.error(`Local XLSX parse error for ${filename}:`, err);
+      return '';
+    }
+  }
+  return '';
+}
+
+// Serve local files for download
+app.get('/api/local-files/download', (req: Request, res: Response) => {
+  const { name } = req.query;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const filePath = path.join(LOCAL_FILES_DIR, String(name));
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+  res.download(filePath);
+});
+
+// List/search knowledge files (Supabase + local)
 app.get('/api/knowledge-files', async (req: Request, res: Response) => {
   try {
-    const { data, error } = await supabase
+    const { data: supaFiles, error } = await supabase
       .from('knowledge_files')
       .select('*')
       .order('is_default', { ascending: false })
       .order('created_at', { ascending: false });
     if (error) throw error;
-    res.json({ files: data });
+    const localFiles = getLocalFilesList();
+    res.json({ files: [...(supaFiles || []), ...localFiles] });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get a public download URL for a file
+// Get a public download URL for a Supabase file
 app.get('/api/knowledge-files/download', async (req: Request, res: Response) => {
-  const { bucket, path } = req.query;
-  if (!bucket || !path) return res.status(400).json({ error: 'bucket and path are required' });
+  const { bucket, path: filePath } = req.query;
+  if (!bucket || !filePath) return res.status(400).json({ error: 'bucket and path are required' });
+  if (bucket === 'local') {
+    // Redirect to local file download endpoint
+    return res.redirect(`/api/local-files/download?name=${encodeURIComponent(String(filePath))}`);
+  }
   try {
-    const { data, error } = await supabase.storage.from(String(bucket)).createSignedUrl(String(path), 60 * 60); // 1 hour
+    const { data, error } = await supabase.storage.from(String(bucket)).createSignedUrl(String(filePath), 60 * 60);
     if (error) throw error;
     res.json({ url: data.signedUrl });
   } catch (err: any) {
@@ -81,50 +148,69 @@ app.get('/api/knowledge-files/download', async (req: Request, res: Response) => 
   }
 });
 
-// Chat endpoint with AI integration
+// Chat history endpoints
+app.post('/api/chat-history', (req: Request, res: Response) => {
+  const { user, question, answer, timestamp } = req.body;
+  let history = [];
+  if (fs.existsSync(CHAT_HISTORY_FILE)) {
+    history = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, 'utf-8'));
+  }
+  history.push({ user, question, answer, timestamp: timestamp || new Date().toISOString() });
+  fs.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(history, null, 2));
+  res.json({ success: true });
+});
+
+app.get('/api/chat-history', (req: Request, res: Response) => {
+  if (!fs.existsSync(CHAT_HISTORY_FILE)) return res.json({ history: [] });
+  const history = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, 'utf-8'));
+  res.json({ history });
+});
+
+// Chat endpoint with AI integration (Supabase + local files)
 app.post('/api/chat', async (req: Request, res: Response) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ message: 'Message is required.' });
 
   try {
-    // Fetch all knowledge files (default + user)
-    const { data: files, error } = await supabase
+    // Fetch all knowledge files (Supabase + local)
+    const { data: supaFiles, error } = await supabase
       .from('knowledge_files')
       .select('*')
       .order('is_default', { ascending: false })
       .order('created_at', { ascending: false });
     if (error) throw error;
+    const localFiles = getLocalFilesList();
+    const allFiles = [...(supaFiles || []), ...localFiles];
 
     // Simple keyword search: filter files by user question
     const keyword = message.toLowerCase();
-    const relevantFiles = (files || []).filter((f: any) =>
+    const relevantFiles = allFiles.filter((f: any) =>
       f.filename?.toLowerCase().includes(keyword) ||
       f.code_block?.toLowerCase().includes(keyword) ||
       f.type?.toLowerCase().includes(keyword)
     );
-    // If no relevant files, fallback to all files
-    const filesToProcess = relevantFiles.length > 0 ? relevantFiles : files || [];
+    const filesToProcess = relevantFiles.length > 0 ? relevantFiles : allFiles;
 
-    // For each file, get a snippet and a download link, log missing files
+    // For each file, get a snippet and a download link
     const fileInfos = await Promise.all(
       filesToProcess.map(async (f: any) => {
-        const snippet = await getFileContentSnippet(f.bucket, f.path, f.type);
-        const { data: urlData, error: urlError } = await supabase.storage.from(f.bucket).createSignedUrl(f.path, 60 * 60);
-        if (urlError) {
-          console.error(`Download URL error for ${f.bucket}/${f.path}:`, urlError.message);
+        let snippet = '';
+        let downloadUrl = '';
+        if (f.bucket === 'local') {
+          snippet = await getLocalFileContentSnippet(f.filename, f.type);
+          downloadUrl = `${process.env.BACKEND_URL || ''}/api/local-files/download?name=${encodeURIComponent(f.filename)}`;
+        } else {
+          snippet = await getFileContentSnippet(f.bucket, f.path, f.type);
+          const { data: urlData, error: urlError } = await supabase.storage.from(f.bucket).createSignedUrl(f.path, 60 * 60);
+          if (urlError) {
+            console.error(`Download URL error for ${f.bucket}/${f.path}:`, urlError.message);
+          }
+          downloadUrl = urlData?.signedUrl || '';
         }
         return {
-          id: f.id,
-          filename: f.filename,
-          bucket: f.bucket,
-          path: f.path,
-          type: f.type,
-          code_block: f.code_block,
-          is_default: f.is_default,
-          uploaded_by: f.uploaded_by,
-          created_at: f.created_at,
+          ...f,
           snippet,
-          downloadUrl: urlData?.signedUrl || null
+          downloadUrl
         };
       })
     );
