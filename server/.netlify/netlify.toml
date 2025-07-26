@@ -1,4 +1,6 @@
 plugins = []
+functionsDirectory = "C:\\Users\\tscr\\Downloads\\code-concierge-nexus-main - Copy (2)\\server\\netlify\\functions"
+functionsDirectoryOrigin = "config-v1"
 headers = []
 redirects = []
 
@@ -7,11 +9,12 @@ redirects = []
 [functions."*"]
 
 [build]
-publish = "C:\\Users\\tscr\\Downloads\\code-concierge-nexus-main - Copy (2)\\server\\dist"
+publish = "C:\\Users\\tscr\\Downloads\\code-concierge-nexus-main - Copy (2)\\server\\public"
 publishOrigin = "config"
 commandOrigin = "config"
 base = "C:\\Users\\tscr\\Downloads\\code-concierge-nexus-main - Copy (2)\\server"
-command = "npm run build"
+command = "hygo"
+functions = "C:\\Users\\tscr\\Downloads\\code-concierge-nexus-main - Copy (2)\\server\\netlify\\functions"
 
 [build.environment]
 
