@@ -58,112 +58,8 @@ const MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
 // File paths
 const LOCAL_FILES_DIR = path_1.default.join(__dirname, '../../files');
 const CHAT_HISTORY_FILE = path_1.default.join(__dirname, '../../chat_history.json');
-// Mistral Agent ID (we'll create this)
-let MISTRAL_AGENT_ID = null;
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
-// Initialize Mistral Agent with Document Library
-async function initializeMistralAgent() {
-    try {
-        console.log('Initializing Mistral agent with document library...');
-        // First, create a document library
-        const libraryResponse = await axios_1.default.post(`${MISTRAL_BASE_URL}/libraries`, {
-            name: "CODE Framework Knowledge Base",
-            description: "All CODE framework files including PDFs, Excel files, and documentation"
-        }, {
-            headers: {
-                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                'Content-Type': 'application/json'
-            }
-        });
-        const libraryId = libraryResponse.data.id;
-        console.log('Created library with ID:', libraryId);
-        // Upload files to the library
-        await uploadFilesToLibrary(libraryId);
-        // Create an agent with document library access
-        const agentResponse = await axios_1.default.post(`${MISTRAL_BASE_URL}/agents`, {
-            model: "mistral-medium-latest",
-            name: "CODE Framework Assistant",
-            description: "AI assistant with access to CODE framework knowledge base",
-            instructions: "You are an AI assistant with access to the CODE framework knowledge base. You can access PDFs, Excel files, and other documents to answer questions about the CODE framework, CODE blocks, worksheets, tools, and canvases. Always provide accurate information based on the available documents and offer to help users download relevant files when appropriate.",
-            tools: [
-                {
-                    type: "document_library",
-                    library_ids: [libraryId]
-                },
-                {
-                    type: "code_interpreter"
-                }
-            ]
-        }, {
-            headers: {
-                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                'Content-Type': 'application/json'
-            }
-        });
-        MISTRAL_AGENT_ID = agentResponse.data.id;
-        console.log('Created agent with ID:', MISTRAL_AGENT_ID);
-    }
-    catch (error) {
-        console.error('Error initializing Mistral agent:', error);
-        // Fallback to direct API calls if agent creation fails
-    }
-}
-// Upload files to Mistral document library
-async function uploadFilesToLibrary(libraryId) {
-    try {
-        // Upload files from local directory
-        if (fs_1.default.existsSync(LOCAL_FILES_DIR)) {
-            const files = fs_1.default.readdirSync(LOCAL_FILES_DIR);
-            for (const filename of files) {
-                if (filename.endsWith('.pdf') || filename.endsWith('.xlsx')) {
-                    const filePath = path_1.default.join(LOCAL_FILES_DIR, filename);
-                    const fileBuffer = fs_1.default.readFileSync(filePath);
-                    // Create form data for file upload
-                    const formData = new FormData();
-                    formData.append('file', new Blob([fileBuffer]), filename);
-                    await axios_1.default.post(`${MISTRAL_BASE_URL}/libraries/${libraryId}/documents`, formData, {
-                        headers: {
-                            'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                            'Content-Type': 'multipart/form-data'
-                        }
-                    });
-                    console.log(`Uploaded ${filename} to library`);
-                }
-            }
-        }
-        // Upload files from Supabase
-        const { data: supabaseFiles } = await supabase
-            .from('knowledge_files')
-            .select('*');
-        if (supabaseFiles) {
-            for (const file of supabaseFiles) {
-                try {
-                    const { data: fileData } = await supabase.storage
-                        .from('knowledge-files')
-                        .download(file.file_path);
-                    if (fileData) {
-                        const formData = new FormData();
-                        formData.append('file', new Blob([fileData]), file.file_name);
-                        await axios_1.default.post(`${MISTRAL_BASE_URL}/libraries/${libraryId}/documents`, formData, {
-                            headers: {
-                                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                                'Content-Type': 'multipart/form-data'
-                            }
-                        });
-                        console.log(`Uploaded ${file.file_name} from Supabase to library`);
-                    }
-                }
-                catch (error) {
-                    console.error(`Error uploading ${file.file_name}:`, error);
-                }
-            }
-        }
-    }
-    catch (error) {
-        console.error('Error uploading files to library:', error);
-    }
-}
 // Get file content snippet from Supabase
 async function getFileContentSnippet(filePath, fileName) {
     try {
@@ -355,109 +251,111 @@ app.get('/api/chat-history', async (req, res) => {
 app.post('/api/chat', async (req, res) => {
     try {
         const { message } = req.body;
-        if (MISTRAL_AGENT_ID) {
-            // Use Mistral agent with document library
-            const response = await axios_1.default.post(`${MISTRAL_BASE_URL}/agents/${MISTRAL_AGENT_ID}/conversations`, {
-                inputs: message
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-            const aiResponse = response.data.outputs[response.data.outputs.length - 1].content;
-            res.json({
-                response: aiResponse,
-                fileInfos: [],
-                agentUsed: true
-            });
+        if (!message) {
+            return res.status(400).json({ error: 'Message is required' });
         }
-        else {
-            // Fallback to direct API with file context
-            const { data: supabaseFiles } = await supabase
-                .from('knowledge_files')
-                .select('*');
-            const localFiles = getLocalFilesList();
-            // Get relevant files based on query
-            const relevantFiles = [
-                ...(supabaseFiles || []).filter(file => isRelevantToQuery(file.file_name, message)),
-                ...localFiles.filter(file => isRelevantToQuery(file.name, message))
-            ];
-            // Build context from relevant files
-            let context = '';
-            const fileInfos = [];
-            for (const file of relevantFiles.slice(0, 5)) { // Limit to 5 most relevant files
-                try {
-                    let snippet = '';
-                    let downloadUrl = '';
-                    if (file.source === 'local') {
-                        snippet = await getLocalFileContentSnippet(file.name);
-                        downloadUrl = `/api/local-files/download?filePath=${file.path}`;
-                    }
-                    else {
-                        snippet = await getFileContentSnippet(file.path, file.name);
-                        const { data } = await supabase.storage
-                            .from('knowledge-files')
-                            .createSignedUrl(file.path, 3600);
-                        downloadUrl = data?.signedUrl || '';
-                    }
-                    context += `\nFile: ${file.name}\nContent: ${snippet}\n\n`;
-                    fileInfos.push({
-                        name: file.name,
-                        type: file.type,
-                        snippet: snippet.substring(0, 200) + '...',
-                        downloadUrl
-                    });
+        console.log('Received chat request:', message);
+        // Get files from Supabase
+        const { data: supabaseFiles } = await supabase
+            .from('knowledge_files')
+            .select('*');
+        const localFiles = getLocalFilesList();
+        // Get relevant files based on query
+        const relevantFiles = [
+            ...(supabaseFiles || []).filter(file => isRelevantToQuery(file.file_name, message)),
+            ...localFiles.filter(file => isRelevantToQuery(file.name, message))
+        ];
+        // Build context from relevant files
+        let context = '';
+        const fileInfos = [];
+        for (const file of relevantFiles.slice(0, 5)) { // Limit to 5 most relevant files
+            try {
+                let snippet = '';
+                let downloadUrl = '';
+                if (file.source === 'local') {
+                    snippet = await getLocalFileContentSnippet(file.name);
+                    downloadUrl = `/api/local-files/download?filePath=${file.path}`;
                 }
-                catch (error) {
-                    console.error(`Error processing file ${file.name}:`, error);
+                else {
+                    snippet = await getFileContentSnippet(file.path, file.name);
+                    const { data } = await supabase.storage
+                        .from('knowledge-files')
+                        .createSignedUrl(file.path, 3600);
+                    downloadUrl = data?.signedUrl || '';
                 }
+                context += `\nFile: ${file.name}\nContent: ${snippet}\n\n`;
+                fileInfos.push({
+                    name: file.name,
+                    type: file.type,
+                    snippet: snippet.substring(0, 200) + '...',
+                    downloadUrl
+                });
             }
-            // Call Mistral AI with context
-            const mistralResponse = await axios_1.default.post(`${MISTRAL_BASE_URL}/chat/completions`, {
-                model: "mistral-medium-latest",
-                messages: [
-                    {
-                        role: "system",
-                        content: `You are an AI assistant with access to the CODE framework knowledge base. You have access to the following files and their content:\n${context}\n\nPlease answer questions based on this information and offer to help users download relevant files when appropriate.`
-                    },
-                    {
-                        role: "user",
-                        content: message
-                    }
-                ],
-                max_tokens: 1000,
-                temperature: 0.7
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-            res.json({
-                response: mistralResponse.data.choices[0].message.content,
-                fileInfos,
-                agentUsed: false
-            });
+            catch (error) {
+                console.error(`Error processing file ${file.name}:`, error);
+            }
         }
+        // If no relevant files found, include all files for context
+        if (context === '') {
+            const allFiles = [
+                ...(supabaseFiles || []).map(file => ({ name: file.file_name, type: 'excel', source: 'supabase', path: file.file_path })),
+                ...localFiles.map(file => ({ name: file.name, type: file.type, source: 'local', path: file.path }))
+            ];
+            context = `Available files: ${allFiles.map(f => f.name).join(', ')}`;
+        }
+        console.log('Sending request to Mistral AI...');
+        // Call Mistral AI with context
+        const mistralResponse = await axios_1.default.post(`${MISTRAL_BASE_URL}/chat/completions`, {
+            model: "mistral-medium-latest",
+            messages: [
+                {
+                    role: "system",
+                    content: `You are an AI assistant with access to the CODE framework knowledge base. You have access to the following files and their content:\n${context}\n\nPlease answer questions based on this information and offer to help users download relevant files when appropriate. If you find relevant files, mention them and provide download information.`
+                },
+                {
+                    role: "user",
+                    content: message
+                }
+            ],
+            max_tokens: 1000,
+            temperature: 0.7
+        }, {
+            headers: {
+                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        console.log('Mistral AI response received');
+        const aiResponse = mistralResponse.data.choices[0].message.content;
+        res.json({
+            response: aiResponse,
+            fileInfos,
+            agentUsed: false
+        });
     }
     catch (error) {
         console.error('Error in chat endpoint:', error);
+        // Provide more detailed error information
+        let errorMessage = 'Failed to process chat message';
+        if (error instanceof Error) {
+            errorMessage = error.message;
+        }
         res.status(500).json({
-            error: 'Failed to process chat message',
+            error: errorMessage,
             details: error instanceof Error ? error.message : 'Unknown error'
         });
     }
 });
-// Initialize Mistral agent on startup
-initializeMistralAgent().then(() => {
-    app.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
-        console.log(`Mistral agent initialized: ${MISTRAL_AGENT_ID ? 'Yes' : 'No (using fallback)'}`);
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        mistralKey: MISTRAL_API_KEY ? 'configured' : 'missing'
     });
-}).catch(error => {
-    console.error('Failed to initialize Mistral agent:', error);
-    app.listen(PORT, () => {
-        console.log(`Server running on port ${PORT} (fallback mode)`);
-    });
+});
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Mistral API Key: ${MISTRAL_API_KEY ? 'Configured' : 'Missing'}`);
+    console.log(`Supabase URL: ${supabaseUrl}`);
 });
