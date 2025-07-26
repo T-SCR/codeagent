@@ -50,7 +50,7 @@ const app = (0, express_1.default)();
 const PORT = process.env.PORT || 4000;
 // Supabase configuration
 const supabaseUrl = 'https://pjqbbmbiamiddvrwrals.supabase.co';
-const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqcWJibWJpYW1pZGR2cndyYWxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMzMjI1NDAsImV4cCI6MjA2ODg5ODU0MH0.ZcSfg3FxNfcV76j5gHlHijggvyFcY0lKHGxv0Asx2wQ';
+const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqcWJibWJpYW1pZGR2cndyYWxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMzMjI1NDAsImV4cCI6MjA2ODk5ODU0MH0.ZcSfg3FxNfcV76j5gHlHijggvyFcY0lKHGxv0Asx2wQ';
 const supabase = (0, supabase_js_1.createClient)(supabaseUrl, supabaseKey);
 // Mistral AI configuration
 const MISTRAL_API_KEY = 'nJvo1MlJBpPfIYRX1bEStNWKhkqR4nCr';
@@ -60,6 +60,14 @@ const LOCAL_FILES_DIR = path_1.default.join(__dirname, '../../files');
 const CHAT_HISTORY_FILE = path_1.default.join(__dirname, '../../chat_history.json');
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
+// Root endpoint for testing
+app.get('/', (req, res) => {
+    res.json({
+        message: 'CODE Agent Backend is running!',
+        timestamp: new Date().toISOString(),
+        version: '1.0.0'
+    });
+});
 // Get file content snippet from Supabase
 async function getFileContentSnippet(filePath, fileName) {
     try {
@@ -351,11 +359,14 @@ app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        mistralKey: MISTRAL_API_KEY ? 'configured' : 'missing'
+        mistralKey: MISTRAL_API_KEY ? 'configured' : 'missing',
+        supabaseUrl: supabaseUrl
     });
 });
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Mistral API Key: ${MISTRAL_API_KEY ? 'Configured' : 'Missing'}`);
-    console.log(`Supabase URL: ${supabaseUrl}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🔑 Mistral API Key: ${MISTRAL_API_KEY ? 'Configured' : 'Missing'}`);
+    console.log(`🗄️ Supabase URL: ${supabaseUrl}`);
+    console.log(`📁 Local files directory: ${LOCAL_FILES_DIR}`);
+    console.log(`💾 Chat history file: ${CHAT_HISTORY_FILE}`);
 });
