@@ -1,260 +1,488 @@
-import dotenv from 'dotenv';
-dotenv.config();
-import express, { Request, Response } from 'express';
+import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
 import pdfParse from 'pdf-parse';
+import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
+import dotenv from 'dotenv';
 
-const supabaseUrl = 'https://pjqbbmbiamiddvrwrals.supabase.co';
-const supabaseKey = process.env.SUPABASE_KEY!;
-const supabase = createClient(supabaseUrl, supabaseKey);
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+// Supabase configuration
+const supabaseUrl = 'https://pjqbbmbiamiddvrwrals.supabase.co';
+const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqcWJibWJpYW1pZGR2cndyYWxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMzMjI1NDAsImV4cCI6MjA2ODg5ODU0MH0.ZcSfg3FxNfcV76j5gHlHijggvyFcY0lKHGxv0Asx2wQ';
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Mistral AI configuration
+const MISTRAL_API_KEY = 'nJvo1MlJBpPfIYRX1bEStNWKhkqR4nCr';
+const MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
+
+// File paths
 const LOCAL_FILES_DIR = path.join(__dirname, '../../files');
 const CHAT_HISTORY_FILE = path.join(__dirname, '../../chat_history.json');
+
+// Mistral Agent ID (we'll create this)
+let MISTRAL_AGENT_ID: string | null = null;
 
 app.use(cors());
 app.use(express.json());
 
-async function getFileContentSnippet(bucket: string, pathStr: string, type: string): Promise<string> {
+// Initialize Mistral Agent with Document Library
+async function initializeMistralAgent() {
   try {
-    const { data, error } = await supabase.storage.from(bucket).download(pathStr);
-    if (error || !data) {
-      console.error(`Download error for ${bucket}/${pathStr}:`, error?.message);
-      return '';
-    }
-    if (type === 'pdf') {
-      const buffer = Buffer.from(await data.arrayBuffer());
-      try {
-        const pdfData = await pdfParse(buffer);
-        return pdfData.text.substring(0, 1000);
-      } catch (err) {
-        console.error(`PDF parse error for ${bucket}/${pathStr}:`, err);
-        return '';
-      }
-    } else if (type === 'xlsx') {
-      const buffer = Buffer.from(await data.arrayBuffer());
-      try {
-        const workbook = XLSX.read(buffer, { type: 'buffer' });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-        return JSON.stringify(json).substring(0, 1000);
-      } catch (err) {
-        console.error(`XLSX parse error for ${bucket}/${pathStr}:`, err);
-        return '';
-      }
-    }
-    return '';
-  } catch (err) {
-    console.error(`General file error for ${bucket}/${pathStr}:`, err);
-    return '';
-  }
-}
-
-function getLocalFilesList(): Array<any> {
-  if (!fs.existsSync(LOCAL_FILES_DIR)) return [];
-  const files = fs.readdirSync(LOCAL_FILES_DIR);
-  return files.map((filename) => {
-    const ext = path.extname(filename).toLowerCase();
-    let type = '';
-    if (ext === '.pdf') type = 'pdf';
-    else if (ext === '.xlsx') type = 'xlsx';
-    return {
-      id: `local-${filename}`,
-      filename,
-      bucket: 'local',
-      path: filename,
-      type,
-      code_block: '',
-      is_default: false,
-      uploaded_by: null,
-      created_at: fs.statSync(path.join(LOCAL_FILES_DIR, filename)).ctime,
-    };
-  });
-}
-
-async function getLocalFileContentSnippet(filename: string, type: string): Promise<string> {
-  const filePath = path.join(LOCAL_FILES_DIR, filename);
-  if (!fs.existsSync(filePath)) return '';
-  if (type === 'pdf') {
-    try {
-      const buffer = fs.readFileSync(filePath);
-      const pdfData = await pdfParse(buffer);
-      return pdfData.text.substring(0, 1000);
-    } catch (err) {
-      console.error(`Local PDF parse error for ${filename}:`, err);
-      return '';
-    }
-  } else if (type === 'xlsx') {
-    try {
-      const workbook = XLSX.readFile(filePath);
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      return JSON.stringify(json).substring(0, 1000);
-    } catch (err) {
-      console.error(`Local XLSX parse error for ${filename}:`, err);
-      return '';
-    }
-  }
-  return '';
-}
-
-// Serve local files for download
-app.get('/api/local-files/download', (req: Request, res: Response) => {
-  const { name } = req.query;
-  if (!name) return res.status(400).json({ error: 'name is required' });
-  const filePath = path.join(LOCAL_FILES_DIR, String(name));
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
-  res.download(filePath);
-});
-
-// List/search knowledge files (Supabase + local)
-app.get('/api/knowledge-files', async (req: Request, res: Response) => {
-  try {
-    const { data: supaFiles, error } = await supabase
-      .from('knowledge_files')
-      .select('*')
-      .order('is_default', { ascending: false })
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    const localFiles = getLocalFilesList();
-    res.json({ files: [...(supaFiles || []), ...localFiles] });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Get a public download URL for a Supabase file
-app.get('/api/knowledge-files/download', async (req: Request, res: Response) => {
-  const { bucket, path: filePath } = req.query;
-  if (!bucket || !filePath) return res.status(400).json({ error: 'bucket and path are required' });
-  if (bucket === 'local') {
-    // Redirect to local file download endpoint
-    return res.redirect(`/api/local-files/download?name=${encodeURIComponent(String(filePath))}`);
-  }
-  try {
-    const { data, error } = await supabase.storage.from(String(bucket)).createSignedUrl(String(filePath), 60 * 60);
-    if (error) throw error;
-    res.json({ url: data.signedUrl });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Chat history endpoints
-app.post('/api/chat-history', (req: Request, res: Response) => {
-  const { user, question, answer, timestamp } = req.body;
-  let history = [];
-  if (fs.existsSync(CHAT_HISTORY_FILE)) {
-    history = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, 'utf-8'));
-  }
-  history.push({ user, question, answer, timestamp: timestamp || new Date().toISOString() });
-  fs.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(history, null, 2));
-  res.json({ success: true });
-});
-
-app.get('/api/chat-history', (req: Request, res: Response) => {
-  if (!fs.existsSync(CHAT_HISTORY_FILE)) return res.json({ history: [] });
-  const history = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, 'utf-8'));
-  res.json({ history });
-});
-
-// Chat endpoint with AI integration (Supabase + local files)
-app.post('/api/chat', async (req: Request, res: Response) => {
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ message: 'Message is required.' });
-
-  try {
-    // Fetch all knowledge files (Supabase + local)
-    const { data: supaFiles, error } = await supabase
-      .from('knowledge_files')
-      .select('*')
-      .order('is_default', { ascending: false })
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    const localFiles = getLocalFilesList();
-    const allFiles = [...(supaFiles || []), ...localFiles];
-
-    // Simple keyword search: filter files by user question
-    const keyword = message.toLowerCase();
-    const relevantFiles = allFiles.filter((f: any) =>
-      f.filename?.toLowerCase().includes(keyword) ||
-      f.code_block?.toLowerCase().includes(keyword) ||
-      f.type?.toLowerCase().includes(keyword)
-    );
-    const filesToProcess = relevantFiles.length > 0 ? relevantFiles : allFiles;
-
-    // For each file, get a snippet and a download link
-    const fileInfos = await Promise.all(
-      filesToProcess.map(async (f: any) => {
-        let snippet = '';
-        let downloadUrl = '';
-        if (f.bucket === 'local') {
-          snippet = await getLocalFileContentSnippet(f.filename, f.type);
-          downloadUrl = `${process.env.BACKEND_URL || ''}/api/local-files/download?name=${encodeURIComponent(f.filename)}`;
-        } else {
-          snippet = await getFileContentSnippet(f.bucket, f.path, f.type);
-          const { data: urlData, error: urlError } = await supabase.storage.from(f.bucket).createSignedUrl(f.path, 60 * 60);
-          if (urlError) {
-            console.error(`Download URL error for ${f.bucket}/${f.path}:`, urlError.message);
-          }
-          downloadUrl = urlData?.signedUrl || '';
-        }
-        return {
-          ...f,
-          snippet,
-          downloadUrl
-        };
-      })
-    );
-
-    // Build context string for AI
-    const context = fileInfos.length > 0
-      ? `Available knowledge files (${fileInfos.length}):\n` +
-        fileInfos.map((f, i) => `${i + 1}. ${f.filename} (${f.type})\nSnippet: ${f.snippet}\nDownload: ${f.downloadUrl || 'Not available'}`).join('\n\n')
-      : 'No knowledge base files available.';
-
-    // System prompt for Mistral AI with document_library tool
-    const systemPrompt = `You are an intelligent assistant for the C-O-D-E framework.\n\nCONTEXT:\n${context}\n\nINSTRUCTIONS:\n1. Always search the knowledge base before responding.\n2. If you find relevant files, mention their names and provide download links.\n3. If no relevant knowledge is available, suggest what might be helpful.\n\nUSER QUESTION: ${message}`;
-
-    // Call Mistral AI API with document_library tool enabled
-    const mistralRes = await axios.post(
-      'https://api.mistral.ai/v1/chat/completions',
+    console.log('Initializing Mistral agent with document library...');
+    
+    // First, create a document library
+    const libraryResponse = await axios.post(
+      `${MISTRAL_BASE_URL}/libraries`,
       {
-        model: 'mistral-small-latest',
-        tools: [
-          { "type": "document_library" },
-          { "type": "code_interpreter" }
-        ],
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: message }
-        ]
+        name: "CODE Framework Knowledge Base",
+        description: "All CODE framework files including PDFs, Excel files, and documentation"
       },
       {
         headers: {
-          'Authorization': 'Bearer LV26MDXlNnAeZ8zK0HqcrcH0UOXwihTm',
+          'Authorization': `Bearer ${MISTRAL_API_KEY}`,
           'Content-Type': 'application/json'
         }
       }
     );
-    const aiMessage = mistralRes.data.choices?.[0]?.message?.content || 'No response from AI.';
+    
+    const libraryId = libraryResponse.data.id;
+    console.log('Created library with ID:', libraryId);
+    
+    // Upload files to the library
+    await uploadFilesToLibrary(libraryId);
+    
+    // Create an agent with document library access
+    const agentResponse = await axios.post(
+      `${MISTRAL_BASE_URL}/agents`,
+      {
+        model: "mistral-medium-latest",
+        name: "CODE Framework Assistant",
+        description: "AI assistant with access to CODE framework knowledge base",
+        instructions: "You are an AI assistant with access to the CODE framework knowledge base. You can access PDFs, Excel files, and other documents to answer questions about the CODE framework, CODE blocks, worksheets, tools, and canvases. Always provide accurate information based on the available documents and offer to help users download relevant files when appropriate.",
+        tools: [
+          {
+            type: "document_library",
+            library_ids: [libraryId]
+          },
+          {
+            type: "code_interpreter"
+          }
+        ]
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${MISTRAL_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    MISTRAL_AGENT_ID = agentResponse.data.id;
+    console.log('Created agent with ID:', MISTRAL_AGENT_ID);
+    
+  } catch (error) {
+    console.error('Error initializing Mistral agent:', error);
+    // Fallback to direct API calls if agent creation fails
+  }
+}
 
-    // Return AI answer and file info (with download links)
-    res.json({ message: aiMessage, files: fileInfos });
-  } catch (error: any) {
-    console.error('Mistral AI error:', error?.response?.data || error.message);
-    res.status(500).json({ message: 'Failed to get AI response.' });
+// Upload files to Mistral document library
+async function uploadFilesToLibrary(libraryId: string) {
+  try {
+    // Upload files from local directory
+    if (fs.existsSync(LOCAL_FILES_DIR)) {
+      const files = fs.readdirSync(LOCAL_FILES_DIR);
+      
+      for (const filename of files) {
+        if (filename.endsWith('.pdf') || filename.endsWith('.xlsx')) {
+          const filePath = path.join(LOCAL_FILES_DIR, filename);
+          const fileBuffer = fs.readFileSync(filePath);
+          
+          // Create form data for file upload
+          const formData = new FormData();
+          formData.append('file', new Blob([fileBuffer]), filename);
+          
+          await axios.post(
+            `${MISTRAL_BASE_URL}/libraries/${libraryId}/documents`,
+            formData,
+            {
+              headers: {
+                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
+                'Content-Type': 'multipart/form-data'
+              }
+            }
+          );
+          
+          console.log(`Uploaded ${filename} to library`);
+        }
+      }
+    }
+    
+    // Upload files from Supabase
+    const { data: supabaseFiles } = await supabase
+      .from('knowledge_files')
+      .select('*');
+    
+    if (supabaseFiles) {
+      for (const file of supabaseFiles) {
+        try {
+          const { data: fileData } = await supabase.storage
+            .from('knowledge-files')
+            .download(file.file_path);
+          
+          if (fileData) {
+            const formData = new FormData();
+            formData.append('file', new Blob([fileData]), file.file_name);
+            
+            await axios.post(
+              `${MISTRAL_BASE_URL}/libraries/${libraryId}/documents`,
+              formData,
+              {
+                headers: {
+                  'Authorization': `Bearer ${MISTRAL_API_KEY}`,
+                  'Content-Type': 'multipart/form-data'
+                }
+              }
+            );
+            
+            console.log(`Uploaded ${file.file_name} from Supabase to library`);
+          }
+        } catch (error) {
+          console.error(`Error uploading ${file.file_name}:`, error);
+        }
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error uploading files to library:', error);
+  }
+}
+
+// Get file content snippet from Supabase
+async function getFileContentSnippet(filePath: string, fileName: string): Promise<string> {
+  try {
+    const { data } = await supabase.storage
+      .from('knowledge-files')
+      .download(filePath);
+    
+    if (!data) return 'File content not available';
+    
+    if (fileName.endsWith('.pdf')) {
+      const pdfText = await pdfParse(data);
+      return pdfText.text.substring(0, 500) + '...';
+    } else if (fileName.endsWith('.xlsx')) {
+      const workbook = XLSX.read(data, { type: 'buffer' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      return rows.slice(0, 5).map(row => {
+        const safeRow = Array.isArray(row) ? row : [];
+        return safeRow.join(' ');
+      }).join(' ') + '...';
+    }
+    
+    return 'File content not available';
+  } catch (error) {
+    console.error('Error getting file content:', error);
+    return 'Error reading file content';
+  }
+}
+
+// Get local files list
+function getLocalFilesList(): Array<{name: string, type: string, size: number, path: string}> {
+  if (!fs.existsSync(LOCAL_FILES_DIR)) return [];
+  
+  return fs.readdirSync(LOCAL_FILES_DIR)
+    .filter(filename => filename.endsWith('.pdf') || filename.endsWith('.xlsx'))
+    .map(filename => {
+      const filePath = path.join(LOCAL_FILES_DIR, filename);
+      const stats = fs.statSync(filePath);
+      return {
+        name: filename,
+        type: filename.endsWith('.pdf') ? 'pdf' : 'excel',
+        size: stats.size,
+        path: filename
+      };
+    });
+}
+
+// Get local file content snippet
+async function getLocalFileContentSnippet(filename: string): Promise<string> {
+  try {
+    const filePath = path.join(LOCAL_FILES_DIR, filename);
+    const fileBuffer = fs.readFileSync(filePath);
+    
+    if (filename.endsWith('.pdf')) {
+      const pdfText = await pdfParse(fileBuffer);
+      return pdfText.text.substring(0, 500) + '...';
+    } else if (filename.endsWith('.xlsx')) {
+      const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      return rows.slice(0, 5).map(row => {
+        const safeRow = Array.isArray(row) ? row : [];
+        return safeRow.join(' ');
+      }).join(' ') + '...';
+    }
+    
+    return 'File content not available';
+  } catch (error) {
+    console.error('Error getting local file content:', error);
+    return 'Error reading file content';
+  }
+}
+
+// Simple keyword search for relevance
+function isRelevantToQuery(fileName: string, query: string): boolean {
+  const queryLower = query.toLowerCase();
+  const fileNameLower = fileName.toLowerCase();
+  
+  const keywords = queryLower.split(' ').filter(word => word.length > 2);
+  return keywords.some(keyword => fileNameLower.includes(keyword));
+}
+
+// API Routes
+app.get('/api/knowledge-files', async (req, res) => {
+  try {
+    // Get files from Supabase
+    const { data: supabaseFiles } = await supabase
+      .from('knowledge_files')
+      .select('*');
+    
+    // Get local files
+    const localFiles = getLocalFilesList();
+    
+    // Combine and format files
+    const allFiles = [
+      ...(supabaseFiles || []).map(file => ({
+        id: file.id,
+        name: file.file_name,
+        type: file.file_name.endsWith('.pdf') ? 'pdf' : 'excel',
+        size: file.file_size,
+        source: 'supabase',
+        path: file.file_path
+      })),
+      ...localFiles.map(file => ({
+        id: `local-${file.name}`,
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        source: 'local',
+        path: file.path
+      }))
+    ];
+    
+    res.json(allFiles);
+  } catch (error) {
+    console.error('Error fetching knowledge files:', error);
+    res.status(500).json({ error: 'Failed to fetch knowledge files' });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.get('/api/knowledge-files/download', async (req, res) => {
+  try {
+    const { filePath, source } = req.query;
+    
+    if (source === 'local') {
+      // Serve local file
+      res.redirect(`/api/local-files/download?filePath=${filePath}`);
+    } else {
+      // Generate Supabase download URL
+      const { data } = await supabase.storage
+        .from('knowledge-files')
+        .createSignedUrl(filePath as string, 3600);
+      
+      if (data) {
+        res.json({ downloadUrl: data.signedUrl });
+      } else {
+        res.status(404).json({ error: 'File not found' });
+      }
+    }
+  } catch (error) {
+    console.error('Error generating download URL:', error);
+    res.status(500).json({ error: 'Failed to generate download URL' });
+  }
+});
+
+app.get('/api/local-files/download', async (req, res) => {
+  try {
+    const { filePath } = req.query;
+    const fullPath = path.join(LOCAL_FILES_DIR, filePath as string);
+    
+    if (fs.existsSync(fullPath)) {
+      res.download(fullPath);
+    } else {
+      res.status(404).json({ error: 'File not found' });
+    }
+  } catch (error) {
+    console.error('Error serving local file:', error);
+    res.status(500).json({ error: 'Failed to serve file' });
+  }
+});
+
+app.post('/api/chat-history', async (req, res) => {
+  try {
+    const { messages } = req.body;
+    
+    // Ensure chat history directory exists
+    const chatHistoryDir = path.dirname(CHAT_HISTORY_FILE);
+    if (!fs.existsSync(chatHistoryDir)) {
+      fs.mkdirSync(chatHistoryDir, { recursive: true });
+    }
+    
+    // Save chat history
+    fs.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(messages, null, 2));
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error saving chat history:', error);
+    res.status(500).json({ error: 'Failed to save chat history' });
+  }
+});
+
+app.get('/api/chat-history', async (req, res) => {
+  try {
+    if (fs.existsSync(CHAT_HISTORY_FILE)) {
+      const chatHistory = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, 'utf8'));
+      res.json(chatHistory);
+    } else {
+      res.json([]);
+    }
+  } catch (error) {
+    console.error('Error loading chat history:', error);
+    res.status(500).json({ error: 'Failed to load chat history' });
+  }
+});
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message } = req.body;
+    
+    if (MISTRAL_AGENT_ID) {
+      // Use Mistral agent with document library
+      const response = await axios.post(
+        `${MISTRAL_BASE_URL}/agents/${MISTRAL_AGENT_ID}/conversations`,
+        {
+          inputs: message
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${MISTRAL_API_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      const aiResponse = response.data.outputs[response.data.outputs.length - 1].content;
+      
+      res.json({
+        response: aiResponse,
+        fileInfos: [],
+        agentUsed: true
+      });
+      
+    } else {
+      // Fallback to direct API with file context
+      const { data: supabaseFiles } = await supabase
+        .from('knowledge_files')
+        .select('*');
+      
+      const localFiles = getLocalFilesList();
+      
+      // Get relevant files based on query
+      const relevantFiles = [
+        ...(supabaseFiles || []).filter(file => isRelevantToQuery(file.file_name, message)),
+        ...localFiles.filter(file => isRelevantToQuery(file.name, message))
+      ];
+      
+      // Build context from relevant files
+      let context = '';
+      const fileInfos = [];
+      
+      for (const file of relevantFiles.slice(0, 5)) { // Limit to 5 most relevant files
+        try {
+          let snippet = '';
+          let downloadUrl = '';
+          
+          if (file.source === 'local') {
+            snippet = await getLocalFileContentSnippet(file.name);
+            downloadUrl = `/api/local-files/download?filePath=${file.path}`;
+          } else {
+            snippet = await getFileContentSnippet(file.path, file.name);
+            const { data } = await supabase.storage
+              .from('knowledge-files')
+              .createSignedUrl(file.path, 3600);
+            downloadUrl = data?.signedUrl || '';
+          }
+          
+          context += `\nFile: ${file.name}\nContent: ${snippet}\n\n`;
+          fileInfos.push({
+            name: file.name,
+            type: file.type,
+            snippet: snippet.substring(0, 200) + '...',
+            downloadUrl
+          });
+        } catch (error) {
+          console.error(`Error processing file ${file.name}:`, error);
+        }
+      }
+      
+      // Call Mistral AI with context
+      const mistralResponse = await axios.post(
+        `${MISTRAL_BASE_URL}/chat/completions`,
+        {
+          model: "mistral-medium-latest",
+          messages: [
+            {
+              role: "system",
+              content: `You are an AI assistant with access to the CODE framework knowledge base. You have access to the following files and their content:\n${context}\n\nPlease answer questions based on this information and offer to help users download relevant files when appropriate.`
+            },
+            {
+              role: "user",
+              content: message
+            }
+          ],
+          max_tokens: 1000,
+          temperature: 0.7
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${MISTRAL_API_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      res.json({
+        response: mistralResponse.data.choices[0].message.content,
+        fileInfos,
+        agentUsed: false
+      });
+    }
+    
+  } catch (error) {
+    console.error('Error in chat endpoint:', error);
+    res.status(500).json({ 
+      error: 'Failed to process chat message',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Initialize Mistral agent on startup
+initializeMistralAgent().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Mistral agent initialized: ${MISTRAL_AGENT_ID ? 'Yes' : 'No (using fallback)'}`);
+  });
+}).catch(error => {
+  console.error('Failed to initialize Mistral agent:', error);
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT} (fallback mode)`);
+  });
 }); 
