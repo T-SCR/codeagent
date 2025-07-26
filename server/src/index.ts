@@ -174,11 +174,15 @@ async function getFileContentSnippet(filePath: string, fileName: string): Promis
     
     if (!data) return 'File content not available';
     
+    // Convert Blob to Buffer for processing
+    const arrayBuffer = await data.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
     if (fileName.endsWith('.pdf')) {
-      const pdfText = await pdfParse(data);
+      const pdfText = await pdfParse(buffer);
       return pdfText.text.substring(0, 500) + '...';
     } else if (fileName.endsWith('.xlsx')) {
-      const workbook = XLSX.read(data, { type: 'buffer' });
+      const workbook = XLSX.read(buffer, { type: 'buffer' });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
       return rows.slice(0, 5).map(row => {

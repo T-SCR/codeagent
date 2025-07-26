@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { AuthButton } from '@/components/AuthButton';
-import { AIChat } from '@/components/AIChat';
+import AIChat from '@/components/AIChat';
 import { ChatHistory } from '@/components/ChatHistory';
 import { supabase } from '@/integrations/supabase/client';
 
